@@ -1,0 +1,40 @@
+# App Engine dispatch rules — REFERENCE. Read the warning before deploying anything like this.
+#
+# ╔════════════════════════════════════════════════════════════════════════════╗
+# ║  dispatch.yaml is APP-WIDE, not per-service.                               ║
+# ║                                                                            ║
+# ║  `gcloud app deploy dispatch.yaml` REPLACES every dispatch rule in the      ║
+# ║  project. If other services already have routing rules and they are not     ║
+# ║  in the file you deploy, their custom domains stop working immediately.     ║
+# ║                                                                            ║
+# ║  ALWAYS dump the current rules first and merge into them:                   ║
+# ║    gcloud app describe --format='yaml(dispatchRules)'                       ║
+# ╚════════════════════════════════════════════════════════════════════════════╝
+#
+# Why this file is needed at all: a custom domain mapping attaches the domain to the
+# *application*, and all of its traffic goes to the `default` service unless a dispatch
+# rule sends it elsewhere. Mapping api.example.com without a rule would
+# serve whatever runs in `default`, not this backend.
+#
+# Rules are evaluated in order, first match wins. Max 20 rules per app.
+
+dispatch:
+  # This backend.
+  - url: 'api.example.com/*'
+    service: backend
+
+  # ── Everything below is illustrative. Replace with whatever
+  #    `gcloud app describe --format='yaml(dispatchRules)'` reports for your project,
+  #    or the domains those services own will break the moment this is deployed. ──
+  #
+  # - url: "app-one.example.com/*"
+  #   service: service-one
+  #
+  # - url: "app-two.example.com/*"
+  #   service: service-two
+
+# Deploy with:
+#   gcloud app deploy dispatch.yaml --project=<PROJECT_ID>
+#
+# Verify afterwards:
+#   gcloud app describe --format='yaml(dispatchRules)'

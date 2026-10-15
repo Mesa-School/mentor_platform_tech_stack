@@ -1,0 +1,24 @@
+# dependencies
+node_modules/
+.venv/
+__pycache__/
+
+# builds
+.next/
+dist/
+out/
+coverage/
+*.tsbuildinfo
+
+# env and secrets: only .env.example files are committed
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*service-account*.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log

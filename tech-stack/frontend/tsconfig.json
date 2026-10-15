@@ -1,0 +1,41 @@
+{
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts",
+    "**/*.mts"
+  ],
+  "//exclude": [
+    "src/lib/db is OPT-IN. It ships uncompiled because its dependencies are not",
+    "installed by default — you install ONE of Supabase or MongoDB, never both.",
+    "TO ACTIVATE: install the deps (see src/lib/db/<choice>/README.md), delete the",
+    "adapter you are not using, then remove its line from `exclude` below.",
+    "If you have a separate backend, delete src/lib/db entirely and leave this."
+  ],
+  "exclude": ["node_modules", "src/lib/db"]
+}

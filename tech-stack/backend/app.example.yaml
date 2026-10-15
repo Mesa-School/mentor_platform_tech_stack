@@ -1,0 +1,95 @@
+# App Engine (Standard, Node.js 22) — REFERENCE ONLY. DO NOT DEPLOY THIS FILE.
+#
+# ╔════════════════════════════════════════════════════════════════════════════╗
+# ║  ALWAYS deploy via Cloud Build — NEVER `gcloud app deploy app.yaml`.       ║
+# ║                                                                            ║
+# ║    gcloud builds submit --config cloudbuild.yaml --project=<PROJECT_ID>    ║
+# ║                                                                            ║
+# ║  A direct deploy bypasses Secret Manager. DATABASE_URL and the JWT         ║
+# ║  secrets arrive empty, Zod rejects them at boot, and every request 502s.   ║
+# ╚════════════════════════════════════════════════════════════════════════════╝
+#
+# The real app.yaml is rendered at deploy time by cloudbuild.yaml and is gitignored,
+# because it contains secret values. This file documents the shape it renders to.
+
+runtime: nodejs22
+
+# The App Engine SERVICE. Deliberately NOT 'default': deploying to 'default' replaces
+# whatever already runs there and takes all of its traffic. A named service gets its own
+# URL and version history and cannot disturb an existing app in the same project.
+#   https://backend-dot-my-project.as.r.appspot.com
+# (The 'default' service must exist in the project before any named service can deploy.)
+service: backend
+
+# F2 = 512 MB / 1.2 GHz. Move to F4 if the process gets close to the memory ceiling —
+# App Engine kills an instance that exceeds it, which shows up as sporadic 502s.
+instance_class: F2
+
+automatic_scaling:
+  min_instances: 1 # keeps one instance warm; 0 is cheaper but every cold start pays ~2s
+  max_instances: 4
+  max_concurrent_requests: 40
+
+# Cloud SQL connector. App Engine has no stable egress IP, so connect over the unix socket
+# rather than the database's public IP — otherwise you are whitelisting a range you cannot pin.
+#   gcloud sql instances describe <INSTANCE> --format='value(connectionName)'
+beta_settings:
+  cloud_sql_instances: 'my-project:asia-south1:my-instance'
+
+env_variables:
+  NODE_ENV: 'production'
+
+  SERVICE_NAME: 'My Service'
+  SERVICE_DESCRIPTION: 'A typed REST API over PostgreSQL.'
+
+  # Socket form — note the empty authority, the `host=` parameter, and no sslmode
+  # (the socket is already private). URL-encode the password: @ -> %40, ! -> %21, # -> %23.
+  DATABASE_URL: 'postgresql://app_user:PASSWORD@/mydb?host=/cloudsql/my-project:asia-south1:my-instance'
+  # Over the socket there is no TLS to negotiate.
+  DB_SSL: 'disable'
+  # max_instances x DB_POOL_MAX must stay under the instance's connection limit
+  # (Cloud SQL defaults to 100): 4 x 8 = 32, comfortable.
+  DB_POOL_MAX: '8'
+
+  JWT_ACCESS_SECRET: 'min-32-chars-generate-with-npm-run-prepare-env'
+  JWT_REFRESH_SECRET: 'min-32-chars-and-different-from-the-access-one'
+
+  # Production frontend origin(s), comma-separated, no trailing slash.
+  CORS_ORIGINS: 'https://app.example.com'
+
+  # /docs, /redoc, /openapi.json and /health. In production the docs are NOT mounted
+  # at all unless both of these are set — see src/core/docs/index.ts.
+  DOCS_USERNAME: 'docs'
+  DOCS_PASSWORD: 'change-me'
+
+  LOG_LEVEL: 'info'
+
+  # ── Google Cloud Storage ───────────────────────────────────────────────────
+  # GCS_SERVICE_ACCOUNT_PATH is deliberately absent: on App Engine the runtime service
+  # account (Application Default Credentials) is used, and a key file on disk would be
+  # a liability. Signed URLs additionally need roles/iam.serviceAccountTokenCreator on
+  # the runtime SA *itself*, the IAM Credentials API enabled, and bucket CORS allowing
+  # PUT from the frontend origin.
+  GCS_BUCKET_NAME: 'my-bucket'
+  GCS_BUCKET_PREFIX: 'my-service'
+  GCS_PROJECT_ID: 'my-project'
+  GCS_USE_SIGNED_URLS: 'false'
+  GCS_SIGNED_URL_EXPIRATION: '3600'
+
+  # ── AWS SES ────────────────────────────────────────────────────────────────
+  AWS_REGION: 'ap-south-1'
+  AWS_ACCESS_KEY_ID: 'FILL_ME'
+  AWS_SECRET_ACCESS_KEY: 'FILL_ME'
+  SES_FROM_EMAIL: 'noreply@example.com'
+
+  # ── Azure OpenAI (chat) — DEPLOYMENT is an Azure deployment name, not a model id ──
+  AZURE_OPENAI_CHAT_BASE_URL: 'https://my-resource.openai.azure.com/openai/v1/'
+  AZURE_OPENAI_CHAT_DEPLOYMENT: 'gpt-5.4'
+  AZURE_OPENAI_CHAT_API_KEY: 'FILL_ME'
+
+  # ── Gemini (OpenAI-compatible endpoint; the trailing slash matters) ────────
+  GEMINI_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai/'
+  GEMINI_MODEL: 'gemini-3.7-flash'
+  GEMINI_API_KEY: 'FILL_ME'
+# PORT is provided by App Engine (8080) — setting it here is rejected.
+# TEST_DATABASE_URL is intentionally absent: the test suite must never run against production.

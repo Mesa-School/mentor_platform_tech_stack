@@ -1,0 +1,22 @@
+node_modules/
+dist/
+*.log
+.env
+.env.*
+!.env.example
+coverage/
+.DS_Store
+
+# Local dev uploads (LocalStorage adapter)
+var/uploads/
+
+# Rendered by cloudbuild.yaml at deploy time — contains secret values, never commit it.
+app.yaml
+
+# GCP service-account keys. A private key must never reach a repository or a source upload —
+# on App Engine use the runtime service account (Application Default Credentials) instead.
+*-service-account*.json
+*.serviceaccount.json
+gcp-*.json
+*-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
+credentials.json

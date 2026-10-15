@@ -1,0 +1,128 @@
+-- ============================================================================
+-- EXAMPLE MIGRATION — rename to a real timestamp before using, or delete.
+--
+--   npx supabase migration new init      # creates a properly named file
+--
+-- This file is `.sql.example` on purpose so it is never applied by accident.
+-- It exists to show the ONE pattern that matters in this stack: a table and its
+-- Row Level Security policies, created in the SAME migration.
+--
+-- A table without RLS is readable by anyone holding your anon key — which is
+-- everyone, because that key ships in your JavaScript bundle by design. It
+-- produces no error and no symptom. It simply works, and leaks.
+-- ============================================================================
+
+-- ─── the table ──────────────────────────────────────────────────────────────
+
+create table public.posts (
+  id          uuid primary key default gen_random_uuid(),
+  author_id   uuid not null references auth.users (id) on delete cascade,
+  title       text not null check (char_length(title) between 1 and 200),
+  body        text not null default '',
+  published   boolean not null default false,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now(),
+  deleted_at  timestamptz                       -- soft delete; filter it in every query
+);
+
+-- Every foreign key gets an index. Postgres does NOT create one for you, and
+-- the missing index is invisible until a join gets slow in production.
+create index posts_author_id_idx on public.posts (author_id);
+
+-- The index that matters for the policies below: they filter on author_id, so
+-- every policy check is an index lookup rather than a scan.
+create index posts_author_created_idx on public.posts (author_id, created_at desc);
+
+-- ─── RLS: enable it, then write a policy per operation ──────────────────────
+
+alter table public.posts enable row level security;
+
+-- Do NOT use `for all`. Users almost always may READ more than they may CHANGE,
+-- and one blanket policy grants writes you did not think about.
+
+-- SELECT — you see your own posts, and anyone's published ones.
+create policy "posts_select_own_or_published"
+  on public.posts
+  for select
+  to authenticated
+  using (
+    author_id = (select auth.uid())
+    or (published = true and deleted_at is null)
+  );
+
+-- INSERT — uses WITH CHECK, not USING. Getting this backwards means the
+-- condition does not apply to inserts at all, and anyone can create a row owned
+-- by anyone.
+create policy "posts_insert_own"
+  on public.posts
+  for insert
+  to authenticated
+  with check (author_id = (select auth.uid()));
+
+-- UPDATE — needs BOTH clauses:
+--   USING      which rows you may target
+--   WITH CHECK what they may be changed INTO
+-- Without WITH CHECK, a user can take their own row and set author_id to
+-- someone else's id. On a table with a `role` column, that is self-promotion to
+-- admin in one request.
+create policy "posts_update_own"
+  on public.posts
+  for update
+  to authenticated
+  using      (author_id = (select auth.uid()))
+  with check (author_id = (select auth.uid()));
+
+-- DELETE — separate from update on purpose.
+create policy "posts_delete_own"
+  on public.posts
+  for delete
+  to authenticated
+  using (author_id = (select auth.uid()));
+
+-- Anonymous visitors: published posts only. Note this exposes EVERY COLUMN of
+-- a matching row. If some columns are private, expose a view instead of the
+-- table and put the policy on the view.
+create policy "posts_select_published_anon"
+  on public.posts
+  for select
+  to anon
+  using (published = true and deleted_at is null);
+
+-- ─── keep updated_at honest ─────────────────────────────────────────────────
+
+create or replace function public.set_updated_at()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+create trigger posts_set_updated_at
+  before update on public.posts
+  for each row
+  execute function public.set_updated_at();
+
+-- ============================================================================
+-- AFTER APPLYING, RUN THESE TWO. They are the whole security model of this
+-- stack, and they belong in your routine after EVERY migration.
+--
+--   -- 1. every table has RLS on. Any `false` is world-readable.
+--   select tablename, rowsecurity
+--   from pg_tables where schemaname = 'public'
+--   order by rowsecurity, tablename;
+--
+--   -- 2. every table has at least one policy. RLS on with no policy returns
+--   --    ZERO ROWS, which looks exactly like a bug in your query.
+--   select t.tablename, count(p.policyname) as policies
+--   from pg_tables t
+--   left join pg_policies p
+--     on p.tablename = t.tablename and p.schemaname = 'public'
+--   where t.schemaname = 'public'
+--   group by t.tablename order by policies;
+--
+-- Then prove it from a SECOND account in a private window. Reading the SQL is
+-- not evidence — create a row as user B and try to read it as user A.
+-- ============================================================================

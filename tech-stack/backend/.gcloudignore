@@ -1,0 +1,44 @@
+# Everything here is excluded from the source upload App Engine builds from.
+# Keep src/, tsconfig.json, package.json and package-lock.json — the buildpack runs
+# `npm install` then the `gcp-build` script (tsc), so the TypeScript sources are required.
+
+.git/
+.gitignore
+node_modules/
+dist/
+coverage/
+
+# Secrets and local-only config. app.yaml is rendered by Cloud Build into the upload
+# directory, so it must NOT be ignored.
+.env
+.env.*
+!.env.example
+
+# Tests never run in the App Engine build.
+tests/
+**/*.test.ts
+vitest.config.ts
+tsconfig.test.json
+
+# Local infrastructure and docs.
+docker-compose.yml
+Dockerfile
+.dockerignore
+scripts/
+*.md
+!package.json
+.github/
+.editorconfig
+.prettierrc
+eslint.config.js
+
+# GCP service-account keys must never be uploaded — App Engine uses the runtime
+# service account (Application Default Credentials).
+*-service-account*.json
+*.serviceaccount.json
+gcp-*.json
+*-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
+credentials.json
+
+# Local uploads written by the LocalStorage adapter.
+var/

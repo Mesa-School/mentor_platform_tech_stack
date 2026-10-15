@@ -1,0 +1,237 @@
+# Cloud Build pipeline: deploy this backend to App Engine (Standard, Node.js 22).
+#
+# Cloud Build renders app.yaml at deploy time from Secret Manager + the substitutions below,
+# so no secret is ever committed. App Engine's Node buildpack then installs dependencies, runs
+# the `gcp-build` script (tsc), prunes devDependencies and starts `node dist/index.js`.
+#
+# !! ALWAYS deploy through this file — NEVER run `gcloud app deploy app.yaml` directly.
+# !! A direct deploy bypasses Secret Manager: DATABASE_URL and the JWT secrets arrive empty,
+# !! Zod rejects them at boot, and every request 502s.
+#
+# Submit:
+#   gcloud builds submit --config cloudbuild.yaml --project=<PROJECT_ID> \
+#     --substitutions=_CLOUDSQL_INSTANCE=<proj>:<region>:<instance>,_CORS_ORIGINS=https://app.example.com
+#
+# Prerequisites — see DEPLOY.md (enable APIs, create the App Engine app, create the secrets,
+# grant the Cloud Build service account App Engine Deployer + Service Account User).
+#
+# AUTOMATED DEPLOYS: a Cloud Build trigger passes NO substitutions, so the defaults below are
+# exactly what a push-to-deploy build ships. Fill them in with production-correct values before
+# wiring a trigger — an empty _CLOUDSQL_INSTANCE would deploy with no database socket and every
+# request would 503. Migrations are NOT run by this pipeline; apply them before merging a
+# schema change.
+
+substitutions:
+  # ── App Engine service ──────────────────────────────────────────────────────
+  # The App Engine SERVICE this deploys to. It is NOT 'default' on purpose: a project
+  # hosts many services, and deploying to 'default' replaces whatever already lives
+  # there and takes 100% of its traffic. A named service is isolated — its own URL,
+  # its own versions, its own scaling — and cannot disturb an existing app.
+  #   https://<service>-dot-<project>.<region>.r.appspot.com
+  _APP_ENGINE_SERVICE: 'backend'
+
+  # ── service identity (drives every user-visible name) ────────────────────────
+  _SERVICE_NAME: 'My Service'
+  _SERVICE_DESCRIPTION: 'A typed REST API over PostgreSQL.'
+
+  # ── database ────────────────────────────────────────────────────────────────
+  # Cloud SQL connection name: gcloud sql instances describe <INSTANCE> --format='value(connectionName)'
+  # Leave EMPTY to connect over TCP instead (see DB_SSL below and the note in DEPLOY.md).
+  _CLOUDSQL_INSTANCE: ''
+  # disable over the Cloud SQL unix socket (already private); require for a TCP connection.
+  _DB_SSL: 'disable'
+  _DB_POOL_MAX: '8' # max_instances x pool must stay under the instance connection limit
+
+  # ── app ─────────────────────────────────────────────────────────────────────
+  _CORS_ORIGINS: 'http://localhost:3000'
+  _DOCS_USERNAME: 'docs'
+  _LOG_LEVEL: 'info'
+
+  # ── scaling ─────────────────────────────────────────────────────────────────
+  _INSTANCE_CLASS: 'F2'
+  _MIN_INSTANCES: '1' # 1 keeps an instance warm; 0 is cheaper but every cold start pays ~2s
+  _MAX_INSTANCES: '4'
+
+  # ── Google Cloud Storage ────────────────────────────────────────────────────
+  _GCS_BUCKET_NAME: ''
+  _GCS_BUCKET_PREFIX: ''
+  _GCS_PROJECT_ID: ''
+  _GCS_USE_SIGNED_URLS: 'false'
+  _GCS_SIGNED_URL_EXPIRATION: '3600'
+
+  # ── AWS SES ─────────────────────────────────────────────────────────────────
+  _AWS_REGION: 'ap-south-1'
+  _SES_FROM_EMAIL: ''
+
+  # ── Azure OpenAI (chat) — a DEPLOYMENT name, never a model id ───────────────
+  _AZURE_OPENAI_CHAT_BASE_URL: ''
+  _AZURE_OPENAI_CHAT_DEPLOYMENT: ''
+
+  # ── Gemini (OpenAI-compatible endpoint; note the trailing slash) ────────────
+  _GEMINI_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai/'
+  _GEMINI_MODEL: 'gemini-3.7-flash'
+
+  # Escape hatch: 'true' deploys even when optional secrets are empty (those features stay off).
+  # The four core secrets are always required and this flag does not waive them.
+  _ALLOW_MISSING_SECRETS: 'false'
+
+steps:
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: render-and-deploy
+    entrypoint: bash
+    secretEnv:
+      - DATABASE_URL
+      - JWT_ACCESS_SECRET
+      - JWT_REFRESH_SECRET
+      - DOCS_PASSWORD
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AZURE_OPENAI_CHAT_API_KEY
+      - GEMINI_API_KEY
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        # ── preflight ────────────────────────────────────────────────────────
+        # Secrets are reported by LENGTH, never by value. An empty secret used to
+        # sail through and silently disable a feature in production; now it stops
+        # the deploy. The four core ones cannot be waived — without them the app
+        # fails Zod validation at boot and never serves a request.
+        python3 - <<'PY'
+        import os, sys
+
+        CORE = ["DATABASE_URL", "JWT_ACCESS_SECRET", "JWT_REFRESH_SECRET", "DOCS_PASSWORD"]
+        OPTIONAL = [
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AZURE_OPENAI_CHAT_API_KEY",
+            "GEMINI_API_KEY",
+        ]
+        allow_missing = "${_ALLOW_MISSING_SECRETS}" == "true"
+
+        missing_core, missing_opt = [], []
+        for key in CORE + OPTIONAL:
+            value = (os.environ.get(key) or "").strip()
+            if value:
+                print("  ok     %-32s %d chars" % (key, len(value)))
+            else:
+                print("  EMPTY  %-32s <- not set in Secret Manager" % key)
+                (missing_core if key in CORE else missing_opt).append(key)
+
+        if missing_core:
+            print("\nRefusing to deploy: core secrets are empty -> " + ", ".join(missing_core))
+            print("Create them, e.g.:")
+            print("  printf %s '<value>' | gcloud secrets versions add <secret-name> --data-file=-")
+            sys.exit(1)
+
+        if missing_opt:
+            print("\nOptional secrets empty: " + ", ".join(missing_opt))
+            if allow_missing:
+                print("_ALLOW_MISSING_SECRETS=true - continuing; those integrations stay disabled.")
+            else:
+                print("Re-run with --substitutions=_ALLOW_MISSING_SECRETS=true to accept that.")
+                sys.exit(1)
+        PY
+
+        # ── Cloud SQL socket is opt-in ───────────────────────────────────────
+        # App Engine has no stable egress IP, so a TCP connection to a database
+        # means whitelisting a range you cannot pin down. The socket avoids that
+        # entirely and is the recommended path.
+        BETA_SETTINGS=""
+        if [ -n "${_CLOUDSQL_INSTANCE}" ]; then
+          BETA_SETTINGS=$(printf 'beta_settings:\n  cloud_sql_instances: "%s"\n' "${_CLOUDSQL_INSTANCE}")
+        fi
+
+        # ── render app.yaml ──────────────────────────────────────────────────
+        # PORT is deliberately absent: App Engine injects 8080 and setting it here
+        # is rejected. Secret values are appended afterwards via json.dumps.
+        cat > app.yaml <<YAML
+        runtime: nodejs22
+        service: ${_APP_ENGINE_SERVICE}
+        instance_class: ${_INSTANCE_CLASS}
+
+        automatic_scaling:
+          min_instances: ${_MIN_INSTANCES}
+          max_instances: ${_MAX_INSTANCES}
+          max_concurrent_requests: 40
+
+        $${BETA_SETTINGS}
+        env_variables:
+          NODE_ENV: "production"
+          SERVICE_NAME: "${_SERVICE_NAME}"
+          SERVICE_DESCRIPTION: "${_SERVICE_DESCRIPTION}"
+          DB_SSL: "${_DB_SSL}"
+          DB_POOL_MAX: "${_DB_POOL_MAX}"
+          CORS_ORIGINS: "${_CORS_ORIGINS}"
+          DOCS_USERNAME: "${_DOCS_USERNAME}"
+          LOG_LEVEL: "${_LOG_LEVEL}"
+          GCS_BUCKET_NAME: "${_GCS_BUCKET_NAME}"
+          GCS_BUCKET_PREFIX: "${_GCS_BUCKET_PREFIX}"
+          GCS_PROJECT_ID: "${_GCS_PROJECT_ID}"
+          GCS_USE_SIGNED_URLS: "${_GCS_USE_SIGNED_URLS}"
+          GCS_SIGNED_URL_EXPIRATION: "${_GCS_SIGNED_URL_EXPIRATION}"
+          AWS_REGION: "${_AWS_REGION}"
+          SES_FROM_EMAIL: "${_SES_FROM_EMAIL}"
+          AZURE_OPENAI_CHAT_BASE_URL: "${_AZURE_OPENAI_CHAT_BASE_URL}"
+          AZURE_OPENAI_CHAT_DEPLOYMENT: "${_AZURE_OPENAI_CHAT_DEPLOYMENT}"
+          GEMINI_BASE_URL: "${_GEMINI_BASE_URL}"
+          GEMINI_MODEL: "${_GEMINI_MODEL}"
+        YAML
+
+        # Secret values go through json.dumps so a payload containing quotes,
+        # braces or newlines becomes a valid double-quoted YAML scalar.
+        # Interpolating them into the heredoc above would break on the first
+        # embedded quote — and DATABASE_URL passwords routinely contain them.
+        python3 - >> app.yaml <<'PY'
+        import json, os
+
+        for key in [
+            "DATABASE_URL",
+            "JWT_ACCESS_SECRET",
+            "JWT_REFRESH_SECRET",
+            "DOCS_PASSWORD",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AZURE_OPENAI_CHAT_API_KEY",
+            "GEMINI_API_KEY",
+        ]:
+            value = os.environ.get(key, "")
+            if value:
+                print("  %s: %s" % (key, json.dumps(value)))
+        PY
+
+        # ── show the render, with every secret masked ────────────────────────
+        # The pattern matches KEY (not KEY_ID) on purpose: a narrower pattern
+        # would print AZURE_OPENAI_CHAT_API_KEY and GEMINI_API_KEY in clear text
+        # into the build log on every deploy.
+        echo "Rendered app.yaml (secrets masked):"
+        sed -E 's/^(  [A-Z0-9_]*(SECRET|PASSWORD|TOKEN|KEY|DATABASE_URL)[A-Z0-9_]*): .*/\1: ****/' app.yaml
+
+        # Cheap sanity check before handing it to App Engine.
+        python3 -c "import sys; t=open('app.yaml').read(); sys.exit(0 if 'env_variables:' in t and 'runtime: nodejs22' in t and 'service:' in t else 1)"
+
+        gcloud app deploy app.yaml --quiet --project="$PROJECT_ID"
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/$PROJECT_ID/secrets/backend-database-url/versions/latest
+      env: DATABASE_URL
+    - versionName: projects/$PROJECT_ID/secrets/backend-jwt-access-secret/versions/latest
+      env: JWT_ACCESS_SECRET
+    - versionName: projects/$PROJECT_ID/secrets/backend-jwt-refresh-secret/versions/latest
+      env: JWT_REFRESH_SECRET
+    - versionName: projects/$PROJECT_ID/secrets/backend-docs-password/versions/latest
+      env: DOCS_PASSWORD
+    - versionName: projects/$PROJECT_ID/secrets/backend-aws-access-key-id/versions/latest
+      env: AWS_ACCESS_KEY_ID
+    - versionName: projects/$PROJECT_ID/secrets/backend-aws-secret-access-key/versions/latest
+      env: AWS_SECRET_ACCESS_KEY
+    - versionName: projects/$PROJECT_ID/secrets/backend-azure-openai-chat-key/versions/latest
+      env: AZURE_OPENAI_CHAT_API_KEY
+    - versionName: projects/$PROJECT_ID/secrets/backend-gemini-api-key/versions/latest
+      env: GEMINI_API_KEY
+
+timeout: 1200s
+options:
+  logging: CLOUD_LOGGING_ONLY
